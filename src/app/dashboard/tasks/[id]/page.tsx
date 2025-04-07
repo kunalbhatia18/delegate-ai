@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useParams } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 
 interface Task {
@@ -28,22 +28,28 @@ interface Task {
   } | null;
 }
 
-export default function TaskDetailPage({ params }: { params: { id: string } }) {
+export default function TaskDetailPage() {
+  // Use the useParams hook instead of directly accessing params
+  const params = useParams();
+  const taskId = params?.id as string;
+  
   const { user } = useAuth();
   const router = useRouter();
   const [task, setTask] = useState<Task | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<{text: string, type: 'success' | 'error' | 'info'}|null>(null);
   const [updatingStatus, setUpdatingStatus] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0); // Used to force refresh
 
   useEffect(() => {
     async function fetchTaskDetails() {
-      if (!user) return;
+      if (!user || !taskId) return;
       
       try {
         setLoading(true);
         
-        const response = await fetch(`/api/tasks?taskId=${params.id}`);
+        const response = await fetch(`/api/tasks?taskId=${taskId}`);
         
         if (!response.ok) {
           throw new Error('Failed to fetch task details');
@@ -51,6 +57,7 @@ export default function TaskDetailPage({ params }: { params: { id: string } }) {
         
         const data = await response.json();
         setTask(data);
+        
       } catch (error) {
         console.error('Error fetching task details:', error);
         setError('Failed to load task details. Please try again.');
@@ -60,10 +67,22 @@ export default function TaskDetailPage({ params }: { params: { id: string } }) {
     }
     
     fetchTaskDetails();
-  }, [user, params.id]);
+  }, [user, taskId, refreshKey]); // Added refreshKey to dependencies
   
   async function handleStatusUpdate(newStatus: string) {
     if (!user || !task) return;
+    
+    // Clear any previous action messages
+    setActionMessage(null);
+    
+    // Handle the case where a user tries to complete a task that hasn't been accepted
+    if (newStatus === 'completed' && task.status === 'assigned') {
+      setActionMessage({
+        text: 'You need to accept this task before marking it as completed. Please click "Accept Task" first.',
+        type: 'info'
+      });
+      return;
+    }
     
     try {
       setUpdatingStatus(true);
@@ -82,14 +101,35 @@ export default function TaskDetailPage({ params }: { params: { id: string } }) {
       });
       
       if (!response.ok) {
-        throw new Error('Failed to update task status');
+        // Try to get the detailed error message from the response
+        try {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to update task status');
+        } catch (jsonError) {
+          throw new Error('Failed to update task status');
+        }
       }
       
       const updatedTask = await response.json();
       setTask(updatedTask);
+      
+      // Show success message
+      setActionMessage({
+        text: `Task ${newStatus === 'completed' ? 'marked as complete' : 
+               newStatus === 'accepted' ? 'accepted' : 
+               newStatus === 'declined' ? 'declined' : 'status updated'}!`,
+        type: 'success'
+      });
+      
+      // Force a refresh to ensure we have the latest state
+      setRefreshKey(prevKey => prevKey + 1);
+      
     } catch (error) {
       console.error('Error updating task status:', error);
-      alert('Failed to update task status. Please try again.');
+      setActionMessage({
+        text: (error as Error).message || 'Failed to update task status. Please try again.',
+        type: 'error'
+      });
     } finally {
       setUpdatingStatus(false);
     }
@@ -140,6 +180,9 @@ export default function TaskDetailPage({ params }: { params: { id: string } }) {
   const isAssignee = user && task.assignee && user.id === task.assignee.id;
   const isDelegator = user && user.id === task.delegator.id;
   
+  // For better UX, show buttons based on task status and user role
+  const isActionable = isAssignee && task.status !== 'completed' && task.status !== 'declined';
+  
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
@@ -153,6 +196,17 @@ export default function TaskDetailPage({ params }: { params: { id: string } }) {
       </div>
       
       <div className="bg-white shadow-md rounded-lg p-6">
+        {/* Action message with appropriate styling based on type */}
+        {actionMessage && (
+          <div className={`mb-4 p-3 rounded-md ${
+            actionMessage.type === 'success' ? 'bg-green-100 text-green-700' :
+            actionMessage.type === 'error' ? 'bg-red-100 text-red-700' :
+            'bg-blue-100 text-blue-700'
+          }`}>
+            {actionMessage.text}
+          </div>
+        )}
+        
         <div className="mb-6 pb-4 border-b">
           <h2 className="text-2xl font-medium mb-2">{task.title}</h2>
           
@@ -225,37 +279,107 @@ export default function TaskDetailPage({ params }: { params: { id: string } }) {
           </div>
         )}
         
-        {isAssignee && task.status !== 'completed' && task.status !== 'declined' && (
-          <div className="flex space-x-4 mt-6 pt-4 border-t">
-            {task.status === 'assigned' && (
-              <button
-                onClick={() => handleStatusUpdate('accepted')}
-                disabled={updatingStatus}
-                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
-              >
-                Accept Task
-              </button>
-            )}
+        {/* Task Action Panel - Shown only if user is assignee and task is not in terminal state */}
+        {isActionable && (
+          <div className="bg-gray-50 p-4 rounded-lg mb-6">
+            <h3 className="font-medium mb-3">Task Actions</h3>
             
-            {(task.status === 'assigned' || task.status === 'accepted') && (
-              <button
-                onClick={() => handleStatusUpdate('completed')}
-                disabled={updatingStatus}
-                className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
-              >
-                Mark as Completed
-              </button>
-            )}
+            {/* Workflow status indicator */}
+            <div className="mb-4 flex items-center">
+              <div className="flex items-center justify-between w-full max-w-md">
+                <div className="text-center">
+                  <div className={`w-8 h-8 mx-auto rounded-full flex items-center justify-center ${
+                    task.status === 'assigned' || task.status === 'accepted' || task.status === 'completed' 
+                      ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-500'
+                  }`}>
+                    1
+                  </div>
+                  <p className="text-xs mt-1">Assigned</p>
+                </div>
+                <div className="flex-1 h-1 bg-gray-200 mx-2">
+                  <div className={`h-1 ${
+                    task.status === 'accepted' || task.status === 'completed' 
+                      ? 'bg-blue-500' : 'bg-gray-200'
+                  }`} style={{width: '100%'}}></div>
+                </div>
+                <div className="text-center">
+                  <div className={`w-8 h-8 mx-auto rounded-full flex items-center justify-center ${
+                    task.status === 'accepted' || task.status === 'completed' 
+                      ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-500'
+                  }`}>
+                    2
+                  </div>
+                  <p className="text-xs mt-1">Accepted</p>
+                </div>
+                <div className="flex-1 h-1 bg-gray-200 mx-2">
+                  <div className={`h-1 ${
+                    task.status === 'completed' 
+                      ? 'bg-purple-500' : 'bg-gray-200'
+                  }`} style={{width: '100%'}}></div>
+                </div>
+                <div className="text-center">
+                  <div className={`w-8 h-8 mx-auto rounded-full flex items-center justify-center ${
+                    task.status === 'completed' 
+                      ? 'bg-purple-500 text-white' : 'bg-gray-200 text-gray-500'
+                  }`}>
+                    3
+                  </div>
+                  <p className="text-xs mt-1">Completed</p>
+                </div>
+              </div>
+            </div>
             
-            {task.status === 'assigned' && (
-              <button
-                onClick={() => handleStatusUpdate('declined')}
-                disabled={updatingStatus}
-                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
-              >
-                Decline Task
-              </button>
-            )}
+            {/* Available actions based on current state */}
+            <div className="flex flex-wrap gap-3">
+              {task.status === 'assigned' && (
+                <>
+                  <button
+                    onClick={() => handleStatusUpdate('accepted')}
+                    disabled={updatingStatus}
+                    className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                  >
+                    Accept Task
+                  </button>
+                  <button
+                    onClick={() => handleStatusUpdate('declined')}
+                    disabled={updatingStatus}
+                    className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
+                  >
+                    Decline Task
+                  </button>
+                  <button
+                    onClick={() => handleStatusUpdate('completed')}
+                    disabled={updatingStatus}
+                    className="px-4 py-2 bg-gray-400 text-white rounded hover:bg-gray-500 disabled:opacity-50"
+                  >
+                    Mark as Completed
+                  </button>
+                </>
+              )}
+              
+              {task.status === 'accepted' && (
+                <button
+                  onClick={() => handleStatusUpdate('completed')}
+                  disabled={updatingStatus}
+                  className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
+                >
+                  Mark as Completed
+                </button>
+              )}
+            </div>
+           
+          </div>
+        )}
+        
+        {/* For tasks in terminal states */}
+        {isAssignee && (task.status === 'completed' || task.status === 'declined') && (
+          <div className="bg-gray-50 p-4 rounded-lg mb-6">
+            <h3 className="font-medium mb-2">Task Status</h3>
+            <p className="text-gray-600">
+              {task.status === 'completed' 
+                ? 'You have completed this task. No further actions are required.' 
+                : 'You have declined this task. No further actions are available.'}
+            </p>
           </div>
         )}
         

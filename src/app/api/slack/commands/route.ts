@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { handleDelegateCommand } from '@/lib/slack/commands/delegate';
 import { adminSupabase } from '@/lib/supabase/admin';
+import axios from 'axios';
 
 export async function POST(request: Request) {
   // Parse form data from Slack
@@ -14,6 +15,29 @@ export async function POST(request: Request) {
   
   console.log('Slack command received:', { command, text, slackUserId, channelId, slackTeamId });
   
+  // Immediately respond to Slack to prevent timeout
+  // This is crucial - Slack requires a response within 3 seconds
+  const immediateResponse = {
+    response_type: 'ephemeral',
+    text: 'Processing your request...'
+  };
+  
+  // Process the command asynchronously
+  processCommandAsync(command, text, slackUserId, channelId, slackTeamId, responseUrl);
+  
+  // Return the immediate response to Slack
+  return NextResponse.json(immediateResponse);
+}
+
+// Process the command asynchronously and update the message when done
+async function processCommandAsync(
+  command: string,
+  text: string,
+  slackUserId: string,
+  channelId: string,
+  slackTeamId: string,
+  responseUrl: string
+) {
   try {
     // Set up test data on demand
     await setupTestData(slackUserId);
@@ -26,10 +50,12 @@ export async function POST(request: Request) {
       .single();
     
     if (!userData) {
-      return NextResponse.json({
+      await updateSlackMessage(responseUrl, {
         response_type: 'ephemeral',
-        text: `Error: Your Slack account (ID: ${slackUserId}) isn't linked to DelegateAI. Contact support.`
+        text: `Error: Your Slack account (ID: ${slackUserId}) isn't linked to DelegateAI. Contact support.`,
+        replace_original: true
       });
+      return;
     }
     
     // Get the user's team
@@ -40,10 +66,12 @@ export async function POST(request: Request) {
       .single();
       
     if (!teamMemberData) {
-      return NextResponse.json({
+      await updateSlackMessage(responseUrl, {
         response_type: 'ephemeral',
-        text: `Error: You need to be part of a team to use this command.`
+        text: `Error: You need to be part of a team to use this command.`,
+        replace_original: true
       });
+      return;
     }
     
     // Handle the command
@@ -53,7 +81,7 @@ export async function POST(request: Request) {
       case '/delegate':
         response = await handleDelegateCommand({
           text,
-          userId: userData.id,
+          slackUserId,
           channelId,
           teamId: teamMemberData.team_id,
           responseUrl
@@ -63,17 +91,32 @@ export async function POST(request: Request) {
       default:
         response = {
           response_type: 'ephemeral',
-          text: `Command ${command} not recognized.`
+          text: `Command ${command} not recognized.`,
+          replace_original: true
         };
     }
     
-    return NextResponse.json(response);
+    // Update the original message with the response
+    await updateSlackMessage(responseUrl, {
+      ...response,
+      replace_original: true
+    });
   } catch (error) {
     console.error('Error processing Slack command:', error);
-    return NextResponse.json({
+    await updateSlackMessage(responseUrl, {
       response_type: 'ephemeral',
-      text: 'An error occurred while processing your command. Check server logs for details.'
+      text: 'An error occurred while processing your command. Check server logs for details.',
+      replace_original: true
     });
+  }
+}
+
+// Function to update a Slack message using the response_url
+async function updateSlackMessage(responseUrl: string, message: any) {
+  try {
+    await axios.post(responseUrl, message);
+  } catch (error) {
+    console.error('Error updating Slack message:', error);
   }
 }
 

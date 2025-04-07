@@ -11,11 +11,11 @@ type CommandParams = {
   text: string;
   slackUserId: string; // Changed from userId to match what's actually passed
   channelId: string;
-  slackTeamId: string; // Changed from teamId to match what's actually passed
+  teamId: string;
   responseUrl: string;
 };
 
-export async function handleDelegateCommand({ text, slackUserId, channelId, slackTeamId, responseUrl }: CommandParams) {
+export async function handleDelegateCommand({ text, slackUserId, channelId, teamId, responseUrl }: CommandParams) {
   // If no task text is provided
   if (!text.trim()) {
     return {
@@ -62,45 +62,28 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, slac
       ? `\nSkills detected: ${matchedSkills.map(s => s.name).join(', ')}`
       : '\nNo specific skills detected';
     
-    console.log(`Looking up workspace with slack_team_id: ${slackTeamId}`);
+    console.log(`Looking up workspace with slack_team_id: ${teamId}`);
     
     // Get team ID from Slack team ID
     const { data: workspaceData, error: workspaceError } = await adminSupabase
       .from('slack_workspaces')
       .select('team_id')
-      .eq('slack_team_id', slackTeamId)
+      .eq('slack_team_id', teamId)
       .single();
     
-    let teamId;
+    let teamIdToUse = teamId;
     
     if (workspaceError || !workspaceData) {
-      console.log('Workspace not found in slack_workspaces, checking team_members table');
-      
-      // Fallback to getting the team from team_members
-      const { data: teamData, error: teamError } = await adminSupabase
-        .from('team_members')
-        .select('team_id')
-        .eq('user_id', userData.id)
-        .single();
-        
-      if (teamError || !teamData) {
-        console.error('Error finding team:', teamError);
-        return {
-          response_type: 'ephemeral',
-          text: 'Error: Could not find your team information in the system.',
-        };
-      }
-      
-      teamId = teamData.team_id;
-      console.log(`Using team ID from team_members: ${teamId}`);
+      console.log('Workspace not found in slack_workspaces, using provided team_id');
+      // Already have team ID from parameter
     } else {
-      teamId = workspaceData.team_id;
-      console.log(`Using team ID from slack_workspaces: ${teamId}`);
+      teamIdToUse = workspaceData.team_id;
+      console.log(`Using team ID from slack_workspaces: ${teamIdToUse}`);
     }
     
     // Use the enhanced assignee matching system with the correct team ID
     const potentialAssignees = await findBestAssignees(
-      teamId,
+      teamIdToUse,
       taskText,
       userData.id,
       matchedSkills.map(s => s.name)
@@ -205,7 +188,7 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, slac
                 channelId,
                 skills: matchedSkills.map(s => s.id),
                 dueDate,
-                teamId: teamId,
+                teamId: teamIdToUse,
                 delegatorId: userData.id
               })
             },

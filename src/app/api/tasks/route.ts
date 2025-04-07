@@ -1,7 +1,16 @@
 import { NextResponse } from 'next/server';
 import { adminSupabase } from '@/lib/supabase/admin';
-import { createTask, updateTaskStatus, assignTask, updateTaskDueDate, deleteTask } from '@/lib/tasks/taskService';
+import { createTask, assignTask, updateTaskDueDate, deleteTask } from '@/lib/tasks/taskService';
 import { recordActivity } from '@/lib/activity/activityService';
+
+// Valid task state transitions with strict sequencing
+const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
+  'pending': ['assigned'],
+  'assigned': ['accepted', 'declined'], // Cannot skip to completed
+  'accepted': ['completed'],
+  'declined': [],  // Terminal state - no transitions allowed
+  'completed': []  // Terminal state - no transitions allowed
+};
 
 export async function GET(request: Request) {
   try {
@@ -107,14 +116,106 @@ export async function POST(request: Request) {
         if (!taskId || !data.status || !data.userId) {
           return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
         }
-        
-        const task = await updateTaskStatus(taskId, data.status, data.userId);
-        
-        if (!task) {
-          throw new Error('Failed to update task status');
+
+        try {
+          // Log the input parameters for debugging
+          console.log("Updating task status:", { taskId, status: data.status, userId: data.userId });
+          
+          // First check current status to ensure valid transition
+          const { data: currentTask, error: fetchError } = await adminSupabase
+            .from('tasks')
+            .select('*')
+            .eq('id', taskId)
+            .single();
+            
+          if (fetchError) {
+            console.error("Error fetching current task status:", fetchError);
+            throw new Error('Failed to fetch current task status');
+          }
+          
+          if (!currentTask) {
+            console.error("Task not found:", taskId);
+            throw new Error('Task not found');
+          }
+          
+          // Log detailed task state for debugging
+          console.log("Current task state:", JSON.stringify(currentTask, null, 2));
+          
+          // Check if the transition is valid
+          const currentStatus = currentTask.status;
+          const targetStatus = data.status;
+          
+          // Get valid next states for the current status
+          const validNextStates = VALID_STATUS_TRANSITIONS[currentStatus] || [];
+          
+          console.log(`Checking transition from '${currentStatus}' to '${targetStatus}'`);
+          console.log(`Valid transitions for ${currentStatus}:`, validNextStates);
+          
+          if (!validNextStates.includes(targetStatus)) {
+            // Custom message for trying to complete an unaccepted task
+            let errorMsg;
+            if (currentStatus === 'assigned' && targetStatus === 'completed') {
+              errorMsg = 'You must first accept this task before marking it as completed.';
+            } else {
+              errorMsg = `Cannot change task status from '${currentStatus}' to '${targetStatus}'. Valid transitions are: ${validNextStates.join(', ') || 'none'}`;
+            }
+            console.error(errorMsg);
+            return NextResponse.json({ error: errorMsg }, { status: 400 });
+          }
+
+          // Prepare updates object
+          const updates: any = { 
+            status: targetStatus 
+          };
+          
+          // Add completion date if the task is being marked as completed
+          if (targetStatus === 'completed') {
+            updates.completion_date = new Date().toISOString();
+          }
+          
+          console.log("Applying updates:", updates);
+          
+          // Update the task
+          const { data: updatedTask, error } = await adminSupabase
+            .from('tasks')
+            .update(updates)
+            .eq('id', taskId)
+            .select(`
+              *,
+              delegator:delegator_id(id, full_name, email, slack_user_id),
+              assignee:assignee_id(id, full_name, email, slack_user_id)
+            `)
+            .single();
+            
+          if (error) {
+            console.error("Database error updating task status:", error);
+            throw error;
+          }
+          
+          if (!updatedTask) {
+            console.error("Updated task is null even though no error was reported");
+            throw new Error('Task not found or could not be updated');
+          }
+          
+          console.log("Successfully updated task to:", updatedTask.status);
+          
+          // Record activity based on the status change
+          try {
+            if (targetStatus === 'completed') {
+              await recordActivity(data.userId, 'task_completion', 'Completed task');
+            } else {
+              await recordActivity(data.userId, 'webapp', `Changed task status to ${targetStatus}`);
+            }
+          } catch (activityError) {
+            console.error("Error recording activity:", activityError);
+            // Continue even if activity recording fails
+          }
+          
+          return NextResponse.json(updatedTask);
+        } catch (updateError) {
+          console.error("Error updating task status:", updateError);
+          throw new Error('Failed to update task status: ' + (updateError as Error).message);
         }
-        
-        return NextResponse.json(task);
       }
       
       case 'assign': {
@@ -152,28 +253,6 @@ export async function POST(request: Request) {
       default:
         return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
     }
-  } catch (error: any) {
-    console.error('API error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-}
-
-export async function DELETE(request: Request) {
-  try {
-    const url = new URL(request.url);
-    const taskId = url.searchParams.get('taskId');
-    
-    if (!taskId) {
-      return NextResponse.json({ error: 'Task ID is required' }, { status: 400 });
-    }
-    
-    const success = await deleteTask(taskId);
-    
-    if (!success) {
-      throw new Error('Failed to delete task');
-    }
-    
-    return NextResponse.json({ success: true });
   } catch (error: any) {
     console.error('API error:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });

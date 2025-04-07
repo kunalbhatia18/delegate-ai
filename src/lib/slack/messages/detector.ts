@@ -115,6 +115,9 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
       return false;
     }
     
+    // Get the top suggested assignee
+    const suggestedAssignee = bestAssignees[0];
+    
     // Prepare task context info
     let contextInfo = '';
     if (detectionResult.deadline) {
@@ -139,6 +142,7 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
         channel: message.channel,
         user: message.user,
         text: `I detected a potential task: "${detectionResult.taskText}"`,
+        // Replace the blocks array in your code with this:
         blocks: [
           {
             type: 'section',
@@ -158,24 +162,30 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: 'Select a team member to delegate this task to:'
+              text: `*Recommended assignee:* ${suggestedAssignee.name}${suggestedAssignee.matchReason ? ` (${suggestedAssignee.matchReason})` : ''}`
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: "Select an assignee:"
             },
             accessory: {
               type: 'static_select',
               placeholder: {
                 type: 'plain_text',
-                text: 'Assign to...',
+                text: 'Choose...',
                 emoji: true
               },
               initial_option: {
                 text: {
                   type: 'plain_text',
-                  text: bestAssignees[0].name,
+                  text: suggestedAssignee.name,
                   emoji: true
                 },
-                value: bestAssignees[0].userId
+                value: suggestedAssignee.userId
               },
-              action_id: 'select_assignee',
               options: bestAssignees.map(assignee => ({
                 text: {
                   type: 'plain_text',
@@ -183,11 +193,13 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
                   emoji: true
                 },
                 value: assignee.userId
-              }))
+              })),
+              action_id: 'select_assignee'
             }
           },
           {
             type: 'actions',
+            block_id: 'delegation_actions',
             elements: [
               {
                 type: 'button',

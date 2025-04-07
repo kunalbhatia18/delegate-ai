@@ -1,8 +1,12 @@
 // src/lib/slack/interactions/handlers.ts
 
 import { supabase } from '@/lib/supabase/client';
+import { adminSupabase } from '@/lib/supabase/admin';
 import { getUserById } from '@/lib/supabase/db';
 import { webClient, sendDirectMessage } from '@/lib/slack/client';
+import { updateTaskStatus } from '@/lib/tasks/taskService';
+import { recordActivity } from '@/lib/activity/activityService';
+import { WebClient } from '@slack/web-api';
 
 // Store state between selection and confirmation
 const delegationState = new Map();
@@ -50,27 +54,48 @@ export async function handleConfirmDelegate(payload: any) {
   try {
     // Parse the button value to get task details
     const buttonValue = JSON.parse(payload.actions[0].value);
-    const { taskText, channelId, skills } = buttonValue;
+    const { taskText, channelId, skills, teamId } = buttonValue;
     
     // Get delegator's Supabase user ID
     const slackUserId = payload.user.id;
     
-    // Get the user's team
-    const { data: teamMemberData } = await supabase
-      .from('team_members')
-      .select('team_id')
-      .eq('user_id', userId)
+    // Get user data
+    const { data: userData } = await supabase
+      .from('users')
+      .select('id')
+      .eq('slack_user_id', slackUserId)
       .single();
     
-    if (!teamMemberData) {
+    if (!userData) {
       return {
         response_type: 'ephemeral',
-        text: 'Error: Could not find your team information.',
+        text: 'Error: Could not find your user information.',
         replace_original: false
       };
     }
     
-    const teamId = teamMemberData.team_id;
+    // Record activity for delegation
+    await recordActivity(userData.id, 'slack', 'Delegated task via Slack');
+    
+    // Get the user's team if not provided
+    let effectiveTeamId = teamId;
+    if (!effectiveTeamId) {
+      const { data: teamMemberData } = await supabase
+        .from('team_members')
+        .select('team_id')
+        .eq('user_id', userData.id)
+        .single();
+      
+      if (!teamMemberData) {
+        return {
+          response_type: 'ephemeral',
+          text: 'Error: Could not find your team information.',
+          replace_original: false
+        };
+      }
+      
+      effectiveTeamId = teamMemberData.team_id;
+    }
     
     // Create the task in Supabase
     const { data: task, error: taskError } = await supabase
@@ -78,9 +103,9 @@ export async function handleConfirmDelegate(payload: any) {
       .insert({
         title: taskText,
         description: `Delegated from Slack in #${payload.channel.name}`,
-        delegator_id: userId,
+        delegator_id: userData.id,
         assignee_id: selectedUserId,
-        team_id: teamId,
+        team_id: effectiveTeamId,
         status: 'assigned',
         slack_ts: payload.message.ts,
         slack_channel: channelId
@@ -113,10 +138,64 @@ export async function handleConfirmDelegate(payload: any) {
     
     // Notify the assignee if they have a Slack ID
     if (assignee?.slack_user_id) {
-      await sendDirectMessage(assignee.slack_user_id, 
-        `You've been assigned a new task: *${taskText}*\n` +
-        `View more details and track this task in the DelegateAI dashboard.`
-      );
+      // Send a more detailed notification with buttons
+      await webClient.chat.postMessage({
+        channel: assignee.slack_user_id,
+        text: `You've been assigned a new task: *${taskText}*`,
+        blocks: [
+          {
+            type: 'header',
+            text: {
+              type: 'plain_text',
+              text: '🎯 New Task Assigned to You',
+              emoji: true
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Task:* ${taskText}`
+            }
+          },
+          {
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `<https://slack.com/archives/${channelId}/p${payload.message.ts.replace('.', '')}|View original message>`
+              }
+            ]
+          },
+          {
+            type: 'actions',
+            elements: [
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: 'Accept Task',
+                  emoji: true
+                },
+                style: 'primary',
+                action_id: 'accept_task',
+                value: task.id
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: 'Decline Task',
+                  emoji: true
+                },
+                style: 'danger',
+                action_id: 'decline_task',
+                value: task.id
+              }
+            ]
+          }
+        ]
+      });
     }
     
     // Clean up state
@@ -168,6 +247,9 @@ export async function handleAutoDelegate(payload: any) {
         replace_original: false
       };
     }
+    
+    // Record activity
+    await recordActivity(userData.id, 'slack', 'Auto-delegated task via Slack');
     
     // Get the user's team
     const { data: teamMemberData } = await supabase
@@ -221,10 +303,64 @@ export async function handleAutoDelegate(payload: any) {
     
     // Notify the assignee if they have a Slack ID
     if (assignee.slack_user_id) {
-      await sendDirectMessage(assignee.slack_user_id, 
-        `You've been assigned a new task: *${taskText}*\n` +
-        `View more details and track this task in the DelegateAI dashboard.`
-      );
+      // Send a more detailed notification with buttons
+      await webClient.chat.postMessage({
+        channel: assignee.slack_user_id,
+        text: `You've been assigned a new task: *${taskText}*`,
+        blocks: [
+          {
+            type: 'header',
+            text: {
+              type: 'plain_text',
+              text: '🎯 New Task Assigned to You',
+              emoji: true
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Task:* ${taskText}`
+            }
+          },
+          {
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `<https://slack.com/archives/${channelId}/p${messageTs.replace('.', '')}|View original message>`
+              }
+            ]
+          },
+          {
+            type: 'actions',
+            elements: [
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: 'Accept Task',
+                  emoji: true
+                },
+                style: 'primary',
+                action_id: 'accept_task',
+                value: task.id
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: 'Decline Task',
+                  emoji: true
+                },
+                style: 'danger',
+                action_id: 'decline_task',
+                value: task.id
+              }
+            ]
+          }
+        ]
+      });
     }
     
     // Post confirmation in thread
@@ -257,4 +393,291 @@ export async function handleNotATask(payload: any) {
     text: 'Got it! I\'ll be more careful with my suggestions in the future.',
     delete_original: true
   };
+}
+
+// NEW FUNCTIONS FOR TASK STATUS MANAGEMENT
+
+export async function handleTaskAcceptance(
+  client: WebClient,
+  taskId: string,
+  slackUserId: string
+): Promise<boolean> {
+  try {
+    // Get user ID from Slack ID
+    const { data: user, error: userError } = await adminSupabase
+      .from('users')
+      .select('id, full_name')
+      .eq('slack_user_id', slackUserId)
+      .single();
+      
+    if (userError || !user) {
+      console.error('Error fetching user:', userError);
+      return false;
+    }
+    
+    // Get task details
+    const { data: task, error: taskError } = await adminSupabase
+      .from('tasks')
+      .select(`
+        *,
+        delegator:delegator_id(id, full_name, slack_user_id)
+      `)
+      .eq('id', taskId)
+      .single();
+      
+    if (taskError || !task) {
+      console.error('Error fetching task:', taskError);
+      return false;
+    }
+    
+    // Update task status
+    const updatedTask = await updateTaskStatus(taskId, 'accepted', user.id);
+    
+    if (!updatedTask) {
+      console.error('Failed to update task status');
+      return false;
+    }
+    
+    // Record activity
+    await recordActivity(user.id, 'slack', 'Accepted task via Slack');
+    
+    // Get delegator's Slack ID for notification
+    const delegatorSlackId = (task.delegator as any).slack_user_id;
+    
+    if (delegatorSlackId) {
+      // Send notification to delegator
+      await client.chat.postMessage({
+        channel: delegatorSlackId,
+        text: `✅ ${user.full_name || 'Team member'} has accepted your task: *${task.title}*`,
+        blocks: [
+          {
+            type: 'header',
+            text: {
+              type: 'plain_text',
+              text: '✅ Task Accepted',
+              emoji: true
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Task:* ${task.title}`
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `${user.full_name || 'Team member'} has *accepted* this task.`
+            }
+          },
+          task.slack_channel && task.slack_ts ? {
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `<https://slack.com/archives/${task.slack_channel}/p${task.slack_ts.replace('.', '')}|View original message>`
+              }
+            ]
+          } : null
+        ].filter(Boolean) as any[]
+      });
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Error handling task acceptance:', error);
+    return false;
+  }
+}
+
+export async function handleTaskDecline(
+  client: WebClient,
+  taskId: string,
+  slackUserId: string
+): Promise<boolean> {
+  try {
+    // Get user ID from Slack ID
+    const { data: user, error: userError } = await adminSupabase
+      .from('users')
+      .select('id, full_name')
+      .eq('slack_user_id', slackUserId)
+      .single();
+      
+    if (userError || !user) {
+      console.error('Error fetching user:', userError);
+      return false;
+    }
+    
+    // Get task details
+    const { data: task, error: taskError } = await adminSupabase
+      .from('tasks')
+      .select(`
+        *,
+        delegator:delegator_id(id, full_name, slack_user_id)
+      `)
+      .eq('id', taskId)
+      .single();
+      
+    if (taskError || !task) {
+      console.error('Error fetching task:', taskError);
+      return false;
+    }
+    
+    // Update task status
+    const updatedTask = await updateTaskStatus(taskId, 'declined', user.id);
+    
+    if (!updatedTask) {
+      console.error('Failed to update task status');
+      return false;
+    }
+    
+    // Record activity
+    await recordActivity(user.id, 'slack', 'Declined task via Slack');
+    
+    // Get delegator's Slack ID for notification
+    const delegatorSlackId = (task.delegator as any).slack_user_id;
+    
+    if (delegatorSlackId) {
+      // Send notification to delegator
+      await client.chat.postMessage({
+        channel: delegatorSlackId,
+        text: `❌ ${user.full_name || 'Team member'} has declined your task: *${task.title}*`,
+        blocks: [
+          {
+            type: 'header',
+            text: {
+              type: 'plain_text',
+              text: '❌ Task Declined',
+              emoji: true
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Task:* ${task.title}`
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `${user.full_name || 'Team member'} has *declined* this task.`
+            }
+          },
+          task.slack_channel && task.slack_ts ? {
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `<https://slack.com/archives/${task.slack_channel}/p${task.slack_ts.replace('.', '')}|View original message>`
+              }
+            ]
+          } : null
+        ].filter(Boolean) as any[]
+      });
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Error handling task decline:', error);
+    return false;
+  }
+}
+
+export async function handleTaskCompletion(
+  client: WebClient,
+  taskId: string,
+  slackUserId: string
+): Promise<boolean> {
+  try {
+    // Get user ID from Slack ID
+    const { data: user, error: userError } = await adminSupabase
+      .from('users')
+      .select('id, full_name')
+      .eq('slack_user_id', slackUserId)
+      .single();
+      
+    if (userError || !user) {
+      console.error('Error fetching user:', userError);
+      return false;
+    }
+    
+    // Get task details
+    const { data: task, error: taskError } = await adminSupabase
+      .from('tasks')
+      .select(`
+        *,
+        delegator:delegator_id(id, full_name, slack_user_id)
+      `)
+      .eq('id', taskId)
+      .single();
+      
+    if (taskError || !task) {
+      console.error('Error fetching task:', taskError);
+      return false;
+    }
+    
+    // Update task status
+    const updatedTask = await updateTaskStatus(taskId, 'completed', user.id);
+    
+    if (!updatedTask) {
+      console.error('Failed to update task status');
+      return false;
+    }
+    
+    // Record activity
+    await recordActivity(user.id, 'task_completion', 'Completed task via Slack');
+    
+    // Get delegator's Slack ID for notification
+    const delegatorSlackId = (task.delegator as any).slack_user_id;
+    
+    if (delegatorSlackId) {
+      // Send notification to delegator
+      await client.chat.postMessage({
+        channel: delegatorSlackId,
+        text: `🎉 ${user.full_name || 'Team member'} has completed your task: *${task.title}*`,
+        blocks: [
+          {
+            type: 'header',
+            text: {
+              type: 'plain_text',
+              text: '🎉 Task Completed',
+              emoji: true
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Task:* ${task.title}`
+            }
+          },
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `${user.full_name || 'Team member'} has *completed* this task.`
+            }
+          },
+          task.slack_channel && task.slack_ts ? {
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `<https://slack.com/archives/${task.slack_channel}/p${task.slack_ts.replace('.', '')}|View original message>`
+              }
+            ]
+          } : null
+        ].filter(Boolean) as any[]
+      });
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('Error handling task completion:', error);
+    return false;
+  }
 }

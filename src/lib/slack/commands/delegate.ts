@@ -1,18 +1,21 @@
+// src/lib/slack/commands/delegate.ts
+
 import { supabase } from '@/lib/supabase/client';
 import { adminSupabase } from '@/lib/supabase/admin';
 import { getAllSkills } from '@/lib/supabase/db';
 import { findBestAssignees } from '@/lib/tasks/assigneeMatchingService';
 import { recordActivity } from '@/lib/activity/activityService';
+import { createTask } from '@/lib/tasks/taskService';
 
 type CommandParams = {
   text: string;
-  userId: string;
+  slackUserId: string; // Changed from userId to match what's actually passed
   channelId: string;
-  teamId: string;
+  slackTeamId: string; // Changed from teamId to match what's actually passed
   responseUrl: string;
 };
 
-export async function handleDelegateCommand({ text, userId, channelId, teamId, responseUrl }: CommandParams) {
+export async function handleDelegateCommand({ text, slackUserId, channelId, slackTeamId, responseUrl }: CommandParams) {
   // If no task text is provided
   if (!text.trim()) {
     return {
@@ -25,8 +28,27 @@ export async function handleDelegateCommand({ text, userId, channelId, teamId, r
     // Extract task details (basic version for now)
     const taskText = text.trim();
     
+    console.log(`Looking up user with slack_user_id: ${slackUserId}`);
+    
+    // Get the user's Supabase ID from their Slack ID
+    const { data: userData, error: userError } = await adminSupabase
+      .from('users')
+      .select('id, full_name')
+      .eq('slack_user_id', slackUserId)
+      .single();
+      
+    if (userError || !userData) {
+      console.error('Error finding user:', userError);
+      return {
+        response_type: 'ephemeral',
+        text: 'Error: Could not find your user information in the system.',
+      };
+    }
+    
+    console.log(`Found user: ${JSON.stringify(userData)}`);
+    
     // Record activity for this user
-    await recordActivity(userId, 'slack', 'Used /delegate command');
+    await recordActivity(userData.id, 'slack', 'Used /delegate command');
     
     // Get skills to check if any match in the task text
     const skills = await getAllSkills();
@@ -40,11 +62,47 @@ export async function handleDelegateCommand({ text, userId, channelId, teamId, r
       ? `\nSkills detected: ${matchedSkills.map(s => s.name).join(', ')}`
       : '\nNo specific skills detected';
     
-    // Use the enhanced assignee matching system
+    console.log(`Looking up workspace with slack_team_id: ${slackTeamId}`);
+    
+    // Get team ID from Slack team ID
+    const { data: workspaceData, error: workspaceError } = await adminSupabase
+      .from('slack_workspaces')
+      .select('team_id')
+      .eq('slack_team_id', slackTeamId)
+      .single();
+    
+    let teamId;
+    
+    if (workspaceError || !workspaceData) {
+      console.log('Workspace not found in slack_workspaces, checking team_members table');
+      
+      // Fallback to getting the team from team_members
+      const { data: teamData, error: teamError } = await adminSupabase
+        .from('team_members')
+        .select('team_id')
+        .eq('user_id', userData.id)
+        .single();
+        
+      if (teamError || !teamData) {
+        console.error('Error finding team:', teamError);
+        return {
+          response_type: 'ephemeral',
+          text: 'Error: Could not find your team information in the system.',
+        };
+      }
+      
+      teamId = teamData.team_id;
+      console.log(`Using team ID from team_members: ${teamId}`);
+    } else {
+      teamId = workspaceData.team_id;
+      console.log(`Using team ID from slack_workspaces: ${teamId}`);
+    }
+    
+    // Use the enhanced assignee matching system with the correct team ID
     const potentialAssignees = await findBestAssignees(
       teamId,
       taskText,
-      userId,
+      userData.id,
       matchedSkills.map(s => s.name)
     );
     
@@ -54,6 +112,34 @@ export async function handleDelegateCommand({ text, userId, channelId, teamId, r
         response_type: 'ephemeral',
         text: `Task: "${taskText}"\n\nYou need to add team members before you can delegate tasks.${skillsText}`,
       };
+    }
+    
+    // Now compose the due date section if needed
+    // You could add more sophisticated date parsing here
+    let dueDate = null;
+    const dueDateMatch = taskText.match(/by\s+(next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow)/i);
+    if (dueDateMatch) {
+      // A very simple date parser for demonstration
+      const dateText = dueDateMatch[0].toLowerCase();
+      let date = new Date();
+      
+      if (dateText.includes('tomorrow')) {
+        date.setDate(date.getDate() + 1);
+      } else if (dateText.includes('next')) {
+        // Set to next week
+        date.setDate(date.getDate() + 7);
+      } else {
+        // Set to this week
+        const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+        const targetDay = days.indexOf(dueDateMatch[2].toLowerCase());
+        if (targetDay !== -1) {
+          const currentDay = date.getDay();
+          const daysToAdd = (targetDay + 7 - currentDay) % 7;
+          date.setDate(date.getDate() + daysToAdd);
+        }
+      }
+      
+      dueDate = date.toISOString();
     }
     
     // Create a basic interactive message to select an assignee
@@ -68,6 +154,13 @@ export async function handleDelegateCommand({ text, userId, channelId, teamId, r
             text: `*New Task*: ${taskText}${skillsText}`
           }
         },
+        dueDate ? {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Due Date*: ${new Date(dueDate).toLocaleDateString()}`
+          }
+        } : null,
         {
           type: 'divider'
         },
@@ -110,7 +203,10 @@ export async function handleDelegateCommand({ text, userId, channelId, teamId, r
               value: JSON.stringify({
                 taskText,
                 channelId,
-                skills: matchedSkills.map(s => s.id)
+                skills: matchedSkills.map(s => s.id),
+                dueDate,
+                teamId: teamId,
+                delegatorId: userData.id
               })
             },
             {
@@ -125,7 +221,7 @@ export async function handleDelegateCommand({ text, userId, channelId, teamId, r
             }
           ]
         }
-      ]
+      ].filter(Boolean) // Remove null blocks
     };
   } catch (error) {
     console.error('Error handling delegate command:', error);

@@ -2,6 +2,8 @@
 import { NextResponse } from 'next/server';
 import { adminSupabase } from '@/lib/supabase/admin';
 import { WebClient } from '@slack/web-api';
+import { recordActivity } from '@/lib/activity/activityService';
+import { updateTaskStatus } from '@/lib/tasks/taskService';
 
 // Declare the global state type to avoid TypeScript errors
 declare global {
@@ -19,6 +21,7 @@ interface SlackResponse {
   response_type?: 'ephemeral' | 'in_channel';
   replace_original?: boolean;
   delete_original?: boolean;
+  blocks?: any[];
 }
 
 export async function POST(request: Request) {
@@ -198,6 +201,11 @@ export async function POST(request: Request) {
                 };
                 break;
               }
+
+              // Record activity for the delegator
+              if (userData.id) {
+                await recordActivity(userData.id, 'slack', 'Delegated task via Slack');
+              }
               
               // Get assignee info
               const { data: assignee } = await adminSupabase
@@ -214,7 +222,60 @@ export async function POST(request: Request) {
                 try {
                   await client.chat.postMessage({
                     channel: assignee.slack_user_id,
-                    text: `You've been assigned a new task: *${taskText}*\nView more details in the DelegateAI dashboard.`
+                    text: `You've been assigned a new task: *${taskText}*`,
+                    blocks: [
+                      {
+                        type: 'header',
+                        text: {
+                          type: 'plain_text',
+                          text: '🎯 New Task Assigned to You',
+                          emoji: true
+                        }
+                      },
+                      {
+                        type: 'section',
+                        text: {
+                          type: 'mrkdwn',
+                          text: `*Task:* ${taskText}`
+                        }
+                      },
+                      {
+                        type: 'context',
+                        elements: [
+                          {
+                            type: 'mrkdwn',
+                            text: `<https://slack.com/archives/${channelId}/p${payload.message?.ts?.replace('.', '')}|View original message>`
+                          }
+                        ]
+                      },
+                      {
+                        type: 'actions',
+                        elements: [
+                          {
+                            type: 'button',
+                            text: {
+                              type: 'plain_text',
+                              text: 'Accept Task',
+                              emoji: true
+                            },
+                            style: 'primary',
+                            action_id: 'accept_task',
+                            value: task.id
+                          },
+                          {
+                            type: 'button',
+                            text: {
+                              type: 'plain_text',
+                              text: 'Decline Task',
+                              emoji: true
+                            },
+                            style: 'danger',
+                            action_id: 'decline_task',
+                            value: task.id
+                          }
+                        ]
+                      }
+                    ]
                   });
                 } catch (err) {
                   console.error('Error notifying assignee:', err);
@@ -337,6 +398,11 @@ export async function POST(request: Request) {
                 };
                 break;
               }
+
+              // Record activity for the delegator
+              if (userData.id) {
+                await recordActivity(userData.id, 'slack', 'Auto-delegated task via Slack');
+              }
               
               // Get assignee info
               const { data: assignee } = await adminSupabase
@@ -350,7 +416,60 @@ export async function POST(request: Request) {
                 try {
                   await client.chat.postMessage({
                     channel: assignee.slack_user_id,
-                    text: `You've been assigned a new task: *${taskText}*\nView more details in the DelegateAI dashboard.`
+                    text: `You've been assigned a new task: *${taskText}*`,
+                    blocks: [
+                      {
+                        type: 'header',
+                        text: {
+                          type: 'plain_text',
+                          text: '🎯 New Task Assigned to You',
+                          emoji: true
+                        }
+                      },
+                      {
+                        type: 'section',
+                        text: {
+                          type: 'mrkdwn',
+                          text: `*Task:* ${taskText}`
+                        }
+                      },
+                      {
+                        type: 'context',
+                        elements: [
+                          {
+                            type: 'mrkdwn',
+                            text: `<https://slack.com/archives/${channelId}/p${messageTs.replace('.', '')}|View original message>`
+                          }
+                        ]
+                      },
+                      {
+                        type: 'actions',
+                        elements: [
+                          {
+                            type: 'button',
+                            text: {
+                              type: 'plain_text',
+                              text: 'Accept Task',
+                              emoji: true
+                            },
+                            style: 'primary',
+                            action_id: 'accept_task',
+                            value: task.id
+                          },
+                          {
+                            type: 'button',
+                            text: {
+                              type: 'plain_text',
+                              text: 'Decline Task',
+                              emoji: true
+                            },
+                            style: 'danger',
+                            action_id: 'decline_task',
+                            value: task.id
+                          }
+                        ]
+                      }
+                    ]
                   });
                 } catch (err) {
                   console.error('Error notifying assignee:', err);
@@ -404,6 +523,436 @@ export async function POST(request: Request) {
             };
             break;
             
+          // NEW HANDLERS FOR TASK STATUS UPDATES
+          case 'accept_task': {
+            try {
+              const taskId = payload.actions[0].value;
+              const slackUserId = payload.user.id;
+              
+              // Get user's Supabase ID from Slack ID
+              const { data: user, error: userError } = await adminSupabase
+                .from('users')
+                .select('id, full_name')
+                .eq('slack_user_id', slackUserId)
+                .single();
+                
+              if (userError || !user) {
+                console.error('Error finding user:', userError);
+                response = {
+                  text: 'Error identifying your user account.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Get task details
+              const { data: task, error: taskError } = await adminSupabase
+                .from('tasks')
+                .select(`
+                  *,
+                  delegator:delegator_id(id, full_name, slack_user_id)
+                `)
+                .eq('id', taskId)
+                .single();
+                
+              if (taskError || !task) {
+                console.error('Error fetching task:', taskError);
+                response = {
+                  text: 'Error finding the task.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Update task status
+              const { data: updatedTask, error: updateError } = await adminSupabase
+                .from('tasks')
+                .update({ status: 'accepted' })
+                .eq('id', taskId)
+                .select()
+                .single();
+                
+              if (updateError) {
+                console.error('Error updating task:', updateError);
+                response = {
+                  text: 'Error updating task status.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Record activity
+              await recordActivity(user.id, 'slack', 'Accepted task via Slack');
+              
+              // Notify the delegator
+              const delegatorSlackId = (task.delegator as any).slack_user_id;
+              if (delegatorSlackId) {
+                await client.chat.postMessage({
+                  channel: delegatorSlackId,
+                  text: `✅ ${user.full_name || 'Your assignee'} has accepted the task: *${task.title}*`,
+                  blocks: [
+                    {
+                      type: 'header',
+                      text: {
+                        type: 'plain_text',
+                        text: '✅ Task Accepted',
+                        emoji: true
+                      }
+                    },
+                    {
+                      type: 'section',
+                      text: {
+                        type: 'mrkdwn',
+                        text: `*Task:* ${task.title}`
+                      }
+                    },
+                    {
+                      type: 'section',
+                      text: {
+                        type: 'mrkdwn',
+                        text: `${user.full_name || 'Your assignee'} has *accepted* this task.`
+                      }
+                    },
+                    task.slack_channel && task.slack_ts ? {
+                      type: 'context',
+                      elements: [
+                        {
+                          type: 'mrkdwn',
+                          text: `<https://slack.com/archives/${task.slack_channel}/p${task.slack_ts.replace('.', '')}|View original message>`
+                        }
+                      ]
+                    } : null
+                  ].filter(Boolean) as any[]
+                });
+              }
+              
+              // Update the original message to remove the buttons
+              const updatedBlocks = payload.message.blocks
+                .filter((block: any) => block.type !== 'actions')
+                .concat([
+                  {
+                    type: 'context',
+                    elements: [
+                      {
+                        type: 'mrkdwn',
+                        text: '✅ *Task accepted*'
+                      }
+                    ]
+                  }
+                ]);
+                
+              await client.chat.update({
+                channel: payload.container.channel_id,
+                ts: payload.container.message_ts,
+                blocks: updatedBlocks
+              });
+              
+              response = {
+                text: 'You have accepted the task! 👍',
+                response_type: 'ephemeral',
+                replace_original: false
+              };
+            } catch (error) {
+              console.error('Error handling task acceptance:', error);
+              response = {
+                text: 'An error occurred while updating the task status.',
+                response_type: 'ephemeral',
+                replace_original: false
+              };
+            }
+            break;
+          }
+          
+          case 'decline_task': {
+            try {
+              const taskId = payload.actions[0].value;
+              const slackUserId = payload.user.id;
+              
+              // Get user's Supabase ID from Slack ID
+              const { data: user, error: userError } = await adminSupabase
+                .from('users')
+                .select('id, full_name')
+                .eq('slack_user_id', slackUserId)
+                .single();
+                
+              if (userError || !user) {
+                console.error('Error finding user:', userError);
+                response = {
+                  text: 'Error identifying your user account.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Get task details
+              const { data: task, error: taskError } = await adminSupabase
+                .from('tasks')
+                .select(`
+                  *,
+                  delegator:delegator_id(id, full_name, slack_user_id)
+                `)
+                .eq('id', taskId)
+                .single();
+                
+              if (taskError || !task) {
+                console.error('Error fetching task:', taskError);
+                response = {
+                  text: 'Error finding the task.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Update task status
+              const { data: updatedTask, error: updateError } = await adminSupabase
+                .from('tasks')
+                .update({ status: 'declined' })
+                .eq('id', taskId)
+                .select()
+                .single();
+                
+              if (updateError) {
+                console.error('Error updating task:', updateError);
+                response = {
+                  text: 'Error updating task status.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Record activity
+              await recordActivity(user.id, 'slack', 'Declined task via Slack');
+              
+              // Notify the delegator
+              const delegatorSlackId = (task.delegator as any).slack_user_id;
+              if (delegatorSlackId) {
+                await client.chat.postMessage({
+                  channel: delegatorSlackId,
+                  text: `❌ ${user.full_name || 'Your assignee'} has declined the task: *${task.title}*`,
+                  blocks: [
+                    {
+                      type: 'header',
+                      text: {
+                        type: 'plain_text',
+                        text: '❌ Task Declined',
+                        emoji: true
+                      }
+                    },
+                    {
+                      type: 'section',
+                      text: {
+                        type: 'mrkdwn',
+                        text: `*Task:* ${task.title}`
+                      }
+                    },
+                    {
+                      type: 'section',
+                      text: {
+                        type: 'mrkdwn',
+                        text: `${user.full_name || 'Your assignee'} has *declined* this task.`
+                      }
+                    },
+                    task.slack_channel && task.slack_ts ? {
+                      type: 'context',
+                      elements: [
+                        {
+                          type: 'mrkdwn',
+                          text: `<https://slack.com/archives/${task.slack_channel}/p${task.slack_ts.replace('.', '')}|View original message>`
+                        }
+                      ]
+                    } : null
+                  ].filter(Boolean) as any[]
+                });
+              }
+              
+              // Update the original message to remove the buttons
+              const updatedBlocks = payload.message.blocks
+                .filter((block: any) => block.type !== 'actions')
+                .concat([
+                  {
+                    type: 'context',
+                    elements: [
+                      {
+                        type: 'mrkdwn',
+                        text: '❌ *Task declined*'
+                      }
+                    ]
+                  }
+                ]);
+                
+              await client.chat.update({
+                channel: payload.container.channel_id,
+                ts: payload.container.message_ts,
+                blocks: updatedBlocks
+              });
+              
+              response = {
+                text: 'You have declined the task.',
+                response_type: 'ephemeral',
+                replace_original: false
+              };
+            } catch (error) {
+              console.error('Error handling task decline:', error);
+              response = {
+                text: 'An error occurred while updating the task status.',
+                response_type: 'ephemeral',
+                replace_original: false
+              };
+            }
+            break;
+          }
+          
+          case 'complete_task': {
+            try {
+              const taskId = payload.actions[0].value;
+              const slackUserId = payload.user.id;
+              
+              // Get user's Supabase ID from Slack ID
+              const { data: user, error: userError } = await adminSupabase
+                .from('users')
+                .select('id, full_name')
+                .eq('slack_user_id', slackUserId)
+                .single();
+                
+              if (userError || !user) {
+                console.error('Error finding user:', userError);
+                response = {
+                  text: 'Error identifying your user account.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Get task details
+              const { data: task, error: taskError } = await adminSupabase
+                .from('tasks')
+                .select(`
+                  *,
+                  delegator:delegator_id(id, full_name, slack_user_id)
+                `)
+                .eq('id', taskId)
+                .single();
+                
+              if (taskError || !task) {
+                console.error('Error fetching task:', taskError);
+                response = {
+                  text: 'Error finding the task.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Update task status and set completion date
+              const { data: updatedTask, error: updateError } = await adminSupabase
+                .from('tasks')
+                .update({ 
+                  status: 'completed',
+                  completion_date: new Date().toISOString()
+                })
+                .eq('id', taskId)
+                .select()
+                .single();
+                
+              if (updateError) {
+                console.error('Error updating task:', updateError);
+                response = {
+                  text: 'Error updating task status.',
+                  response_type: 'ephemeral',
+                  replace_original: false
+                };
+                break;
+              }
+              
+              // Record activity
+              await recordActivity(user.id, 'task_completion', 'Completed task via Slack');
+              
+              // Notify the delegator
+              const delegatorSlackId = (task.delegator as any).slack_user_id;
+              if (delegatorSlackId) {
+                await client.chat.postMessage({
+                  channel: delegatorSlackId,
+                  text: `🎉 ${user.full_name || 'Your assignee'} has completed the task: *${task.title}*`,
+                  blocks: [
+                    {
+                      type: 'header',
+                      text: {
+                        type: 'plain_text',
+                        text: '🎉 Task Completed',
+                        emoji: true
+                      }
+                    },
+                    {
+                      type: 'section',
+                      text: {
+                        type: 'mrkdwn',
+                        text: `*Task:* ${task.title}`
+                      }
+                    },
+                    {
+                      type: 'section',
+                      text: {
+                        type: 'mrkdwn',
+                        text: `${user.full_name || 'Your assignee'} has *completed* this task.`
+                      }
+                    },
+                    task.slack_channel && task.slack_ts ? {
+                      type: 'context',
+                      elements: [
+                        {
+                          type: 'mrkdwn',
+                          text: `<https://slack.com/archives/${task.slack_channel}/p${task.slack_ts.replace('.', '')}|View original message>`
+                        }
+                      ]
+                    } : null
+                  ].filter(Boolean) as any[]
+                });
+              }
+              
+              // Update the original message to remove the buttons
+              const updatedBlocks = payload.message.blocks
+                .filter((block: any) => block.type !== 'actions')
+                .concat([
+                  {
+                    type: 'context',
+                    elements: [
+                      {
+                        type: 'mrkdwn',
+                        text: '🎉 *Task completed*'
+                      }
+                    ]
+                  }
+                ]);
+                
+              await client.chat.update({
+                channel: payload.container.channel_id,
+                ts: payload.container.message_ts,
+                blocks: updatedBlocks
+              });
+              
+              response = {
+                text: 'Task marked as completed! 🎉',
+                response_type: 'ephemeral',
+                replace_original: false
+              };
+            } catch (error) {
+              console.error('Error handling task completion:', error);
+              response = {
+                text: 'An error occurred while updating the task status.',
+                response_type: 'ephemeral',
+                replace_original: false
+              };
+            }
+            break;
+          }
+            
           default:
             console.log('Unknown action_id:', actionId);
             shouldPostToResponseUrl = false;
@@ -429,6 +978,7 @@ export async function POST(request: Request) {
           body: JSON.stringify({
             text: response.text,
             replace_original: response.replace_original,
+            blocks: response.blocks
           }),
         });
       } catch (error) {

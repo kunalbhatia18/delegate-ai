@@ -1,13 +1,12 @@
 import { supabase } from '@/lib/supabase/client';
-import { adminSupabase } from '@/lib/supabase/admin';
 
-interface SkillInfo {
+export interface SkillInfo {
   id: string;
   name: string;
   description: string | null;
 }
 
-interface UserSkillInfo {
+export interface UserSkillInfo {
   skillId: string;
   skillName: string;
   proficiencyLevel: number;
@@ -26,31 +25,23 @@ export async function getAllSkills(): Promise<SkillInfo[]> {
     return [];
   }
   
-  return data;
+  return data || [];
 }
 
 // Get skills for a specific user
 export async function getUserSkills(userId: string): Promise<UserSkillInfo[]> {
-  const { data, error } = await supabase
-    .from('user_skills')
-    .select(`
-      skill_id,
-      proficiency_level,
-      skills (id, name, description)
-    `)
-    .eq('user_id', userId);
+  try {
+    const response = await fetch(`/api/user-skills?userId=${userId}`);
     
-  if (error) {
+    if (!response.ok) {
+      throw new Error('Failed to fetch user skills');
+    }
+    
+    return await response.json();
+  } catch (error) {
     console.error('Error fetching user skills:', error);
     return [];
   }
-  
-  return data.map(item => ({
-    skillId: item.skill_id,
-    skillName: (item.skills as any).name,
-    proficiencyLevel: item.proficiency_level || 0,
-    description: (item.skills as any).description,
-  }));
 }
 
 // Add skill to user
@@ -58,21 +49,28 @@ export async function addUserSkill(
   userId: string,
   skillId: string,
   proficiencyLevel: number
-): Promise<boolean> {
-  const { error } = await supabase
-    .from('user_skills')
-    .upsert({
-      user_id: userId,
-      skill_id: skillId,
-      proficiency_level: proficiencyLevel
+): Promise<UserSkillInfo[]> {
+  try {
+    const response = await fetch('/api/user-skills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId,
+        skillId,
+        proficiencyLevel
+      })
     });
     
-  if (error) {
+    if (!response.ok) {
+      throw new Error('Failed to add skill');
+    }
+    
+    // Return the updated skills list
+    return await response.json();
+  } catch (error) {
     console.error('Error adding user skill:', error);
-    return false;
+    throw error;
   }
-  
-  return true;
 }
 
 // Remove skill from user
@@ -80,18 +78,20 @@ export async function removeUserSkill(
   userId: string,
   skillId: string
 ): Promise<boolean> {
-  const { error } = await supabase
-    .from('user_skills')
-    .delete()
-    .eq('user_id', userId)
-    .eq('skill_id', skillId);
+  try {
+    const response = await fetch(`/api/user-skills?userId=${userId}&skillId=${skillId}`, {
+      method: 'DELETE'
+    });
     
-  if (error) {
+    if (!response.ok) {
+      throw new Error('Failed to remove skill');
+    }
+    
+    return true;
+  } catch (error) {
     console.error('Error removing user skill:', error);
     return false;
   }
-  
-  return true;
 }
 
 // Update user skill proficiency level
@@ -100,18 +100,14 @@ export async function updateUserSkillLevel(
   skillId: string,
   proficiencyLevel: number
 ): Promise<boolean> {
-  const { error } = await supabase
-    .from('user_skills')
-    .update({ proficiency_level: proficiencyLevel })
-    .eq('user_id', userId)
-    .eq('skill_id', skillId);
-    
-  if (error) {
+  try {
+    // We can reuse addUserSkill since it handles both add and update
+    await addUserSkill(userId, skillId, proficiencyLevel);
+    return true;
+  } catch (error) {
     console.error('Error updating user skill level:', error);
     return false;
   }
-  
-  return true;
 }
 
 // Add a new skill to the system
@@ -119,16 +115,25 @@ export async function addSkill(
   name: string, 
   description?: string
 ): Promise<SkillInfo | null> {
-  const { data, error } = await adminSupabase
-    .from('skills')
-    .insert({ name, description })
-    .select()
-    .single();
+  try {
+    const response = await fetch('/api/skills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'add_skill',
+        name,
+        description
+      })
+    });
     
-  if (error) {
+    if (!response.ok) {
+      throw new Error('Failed to add skill');
+    }
+    
+    const data = await response.json();
+    return data;
+  } catch (error) {
     console.error('Error adding skill:', error);
     return null;
   }
-  
-  return data;
 }

@@ -115,9 +115,6 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
       return false;
     }
     
-    // Take the best assignee
-    const suggestedAssignee = bestAssignees[0];
-    
     // Prepare task context info
     let contextInfo = '';
     if (detectionResult.deadline) {
@@ -132,9 +129,6 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
     if (detectionResult.context) {
       contextInfo += `\n• Context: ${detectionResult.context}`;
     }
-    
-    // Add recommendation reason
-    contextInfo += `\n• Recommendation: ${suggestedAssignee.name} (${suggestedAssignee.matchReason})`;
     
     // Format confidence as percentage
     const confidencePercent = Math.round(detectionResult.confidence * 100);
@@ -164,7 +158,32 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `Suggested assignee: *${suggestedAssignee.name}*`
+              text: 'Select a team member to delegate this task to:'
+            },
+            accessory: {
+              type: 'static_select',
+              placeholder: {
+                type: 'plain_text',
+                text: 'Assign to...',
+                emoji: true
+              },
+              initial_option: {
+                text: {
+                  type: 'plain_text',
+                  text: bestAssignees[0].name,
+                  emoji: true
+                },
+                value: bestAssignees[0].userId
+              },
+              action_id: 'select_assignee',
+              options: bestAssignees.map(assignee => ({
+                text: {
+                  type: 'plain_text',
+                  text: assignee.name,
+                  emoji: true
+                },
+                value: assignee.userId
+              }))
             }
           },
           {
@@ -174,15 +193,14 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
                 type: 'button',
                 text: {
                   type: 'plain_text',
-                  text: 'Delegate',
+                  text: 'Delegate Task',
                   emoji: true
                 },
-                action_id: 'auto_delegate',
+                action_id: 'confirm_delegate',
                 style: 'primary',
                 value: JSON.stringify({
                   taskText: detectionResult.taskText,
                   channelId: message.channel,
-                  assigneeId: suggestedAssignee.userId,
                   messageTs: message.ts
                 })
               },

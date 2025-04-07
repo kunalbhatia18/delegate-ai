@@ -1,5 +1,4 @@
 import { supabase } from '@/lib/supabase/client';
-import { adminSupabase } from '@/lib/supabase/admin';
 
 export interface ActivityRecord {
   userId: string;
@@ -15,17 +14,18 @@ export async function recordActivity(
   details?: string
 ): Promise<boolean> {
   try {
-    // Update the last_active field in the users table
-    const { error: updateError } = await adminSupabase
-      .from('users')
-      .update({ last_active: new Date().toISOString() })
-      .eq('id', userId);
-      
-    if (updateError) {
-      console.error('Error updating user last_active:', updateError);
-      return false;
-    }
+    const response = await fetch('/api/activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'record_activity',
+        userId,
+        source,
+        details
+      })
+    });
     
+    if (!response.ok) throw new Error('Failed to record activity');
     return true;
   } catch (error) {
     console.error('Error recording activity:', error);
@@ -51,35 +51,6 @@ export async function getLastActivity(userId: string): Promise<string | null> {
   } catch (error) {
     console.error('Error getting last activity:', error);
     return null;
-  }
-}
-
-// Get recently active users in a team
-export async function getRecentlyActiveUsers(
-  teamId: string,
-  hoursThreshold: number = 24
-): Promise<{ id: string; full_name: string; last_active: string }[]> {
-  try {
-    const thresholdDate = new Date();
-    thresholdDate.setHours(thresholdDate.getHours() - hoursThreshold);
-    
-    const { data, error } = await supabase
-      .from('team_members')
-      .select(`
-        users:user_id (id, full_name, last_active)
-      `)
-      .eq('team_id', teamId)
-      .gte('users.last_active', thresholdDate.toISOString());
-      
-    if (error) {
-      console.error('Error fetching recently active users:', error);
-      return [];
-    }
-    
-    return (data || []).map((item: any) => item.users);
-  } catch (error) {
-    console.error('Error getting active users:', error);
-    return [];
   }
 }
 

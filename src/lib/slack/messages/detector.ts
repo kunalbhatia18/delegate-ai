@@ -38,6 +38,8 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
     const skills = await getAllSkills();
     const skillNames = skills.map(skill => skill.name);
     
+    console.log(`Analyzing message for tasks. Available skills: ${skillNames.length}`);
+    
     // Configure the task detector with available skills
     TaskDetectorFactory.setSkills(skillNames);
     const detector = TaskDetectorFactory.getDetector('rule-based');
@@ -102,12 +104,16 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
       }
     }
     
-    // Find the best assignees based on the task text
+    // Use detected skills for matching
+    const detectedSkills = detectionResult.suggestedSkills || [];
+    console.log('Skills detected in message:', detectedSkills);
+    
+    // Find the best assignees based on the task text and detected skills
     const bestAssignees = await findBestAssignees(
       slackWorkspace.team_id,
       detectionResult.taskText,
       userData?.id, // Exclude the sender
-      detectionResult.suggestedSkills
+      detectedSkills
     );
     
     if (bestAssignees.length === 0) {
@@ -120,14 +126,17 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
     
     // Prepare task context info
     let contextInfo = '';
+    
+    // Add detected skills info
+    if (detectedSkills.length > 0) {
+      contextInfo += `\n• Skills: ${detectedSkills.join(', ')}`;
+    }
+    
     if (detectionResult.deadline) {
       contextInfo += `\n• Deadline: ${detectionResult.deadline}`;
     }
     if (detectionResult.priority) {
       contextInfo += `\n• Priority: ${detectionResult.priority.charAt(0).toUpperCase() + detectionResult.priority.slice(1)}`;
-    }
-    if (detectionResult.suggestedSkills.length > 0) {
-      contextInfo += `\n• Skills: ${detectionResult.suggestedSkills.join(', ')}`;
     }
     if (detectionResult.context) {
       contextInfo += `\n• Context: ${detectionResult.context}`;
@@ -136,13 +145,18 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
     // Format confidence as percentage
     const confidencePercent = Math.round(detectionResult.confidence * 100);
     
+    // Format the matched skills text
+    let skillsText = 'No specific skills required';
+    if (suggestedAssignee.matchedSkills && suggestedAssignee.matchedSkills.length > 0) {
+      skillsText = suggestedAssignee.matchedSkills.join(', ');
+    }
+    
     // Send ephemeral message to the original sender suggesting delegation
     try {
       await webClient.chat.postEphemeral({
         channel: message.channel,
         user: message.user,
         text: `I detected a potential task: "${detectionResult.taskText}"`,
-        // Replace the blocks array in your code with this:
         blocks: [
           {
             type: 'section',
@@ -162,7 +176,7 @@ export async function detectTaskInMessage(message: any): Promise<boolean> {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `*Recommended assignee:* ${suggestedAssignee.name}${suggestedAssignee.matchReason ? ` (${suggestedAssignee.matchReason})` : ''}`
+              text: `*Recommended assignee:* ${suggestedAssignee.name} (Skills: ${skillsText}, ${suggestedAssignee.matchReason})`
             }
           },
           {

@@ -6,10 +6,11 @@ import { getAllSkills } from '@/lib/supabase/db';
 import { findBestAssignees } from '@/lib/tasks/assigneeMatchingService';
 import { recordActivity } from '@/lib/activity/activityService';
 import { createTask } from '@/lib/tasks/taskService';
+import { TaskDetectorFactory } from '@/lib/taskDetection/detectorFactory';
 
 type CommandParams = {
   text: string;
-  slackUserId: string; // Changed from userId to match what's actually passed
+  slackUserId: string;
   channelId: string;
   teamId: string;
   responseUrl: string;
@@ -25,7 +26,7 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, team
   }
 
   try {
-    // Extract task details (basic version for now)
+    // Extract task details
     const taskText = text.trim();
     
     console.log(`Looking up user with slack_user_id: ${slackUserId}`);
@@ -50,16 +51,27 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, team
     // Record activity for this user
     await recordActivity(userData.id, 'slack', 'Used /delegate command');
     
-    // Get skills to check if any match in the task text
+    // Get skills to detect in the task text
     const skills = await getAllSkills();
+    const skillNames = skills.map(skill => skill.name);
     
-    // Very basic skill matching - just check if the skill name appears in the text
-    const matchedSkills = skills.filter(skill => 
-      taskText.toLowerCase().includes(skill.name.toLowerCase())
-    );
+    // Use the task detector to identify skills and other details
+    TaskDetectorFactory.setSkills(skillNames);
+    const detector = TaskDetectorFactory.getDetector('rule-based');
     
-    const skillsText = matchedSkills.length > 0
-      ? `\nSkills detected: ${matchedSkills.map(s => s.name).join(', ')}`
+    // Detect task details including skills
+    const detectionResult = await detector.detectTask(taskText, {
+      confidenceThreshold: 0.1, // Lower threshold since we already know it's a task
+      verbose: true
+    });
+    
+    // Get detected skills
+    const detectedSkills = detectionResult.suggestedSkills || [];
+    console.log('Skills detected in command:', detectedSkills);
+    
+    // Format the skills text
+    const skillsText = detectedSkills.length > 0
+      ? `\nSkills detected: ${detectedSkills.join(', ')}`
       : '\nNo specific skills detected';
     
     console.log(`Looking up workspace with slack_team_id: ${teamId}`);
@@ -81,12 +93,12 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, team
       console.log(`Using team ID from slack_workspaces: ${teamIdToUse}`);
     }
     
-    // Use the enhanced assignee matching system with the correct team ID
+    // Use the enhanced assignee matching system with the detected skills
     const potentialAssignees = await findBestAssignees(
       teamIdToUse,
       taskText,
       userData.id,
-      matchedSkills.map(s => s.name)
+      detectedSkills
     );
     
     // If no team members available for assignment
@@ -97,32 +109,59 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, team
       };
     }
     
-    // Now compose the due date section if needed
-    // You could add more sophisticated date parsing here
+    // Get the deadline info from detection if available
     let dueDate = null;
-    const dueDateMatch = taskText.match(/by\s+(next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow)/i);
-    if (dueDateMatch) {
-      // A very simple date parser for demonstration
-      const dateText = dueDateMatch[0].toLowerCase();
-      let date = new Date();
+    let deadlineInfo = '';
+    
+    if (detectionResult.deadline) {
+      deadlineInfo = `\n• Deadline: ${detectionResult.deadline}`;
       
-      if (dateText.includes('tomorrow')) {
-        date.setDate(date.getDate() + 1);
-      } else if (dateText.includes('next')) {
-        // Set to next week
-        date.setDate(date.getDate() + 7);
-      } else {
-        // Set to this week
-        const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-        const targetDay = days.indexOf(dueDateMatch[2].toLowerCase());
-        if (targetDay !== -1) {
-          const currentDay = date.getDay();
-          const daysToAdd = (targetDay + 7 - currentDay) % 7;
-          date.setDate(date.getDate() + daysToAdd);
+      // Try to convert text deadline to date object for database
+      try {
+        // Simple date parsing for common formats
+        const dateText = detectionResult.deadline.toLowerCase();
+        let date = new Date();
+        
+        if (dateText.includes('tomorrow')) {
+          date.setDate(date.getDate() + 1);
+          dueDate = date.toISOString();
+        } else if (dateText.includes('next week')) {
+          date.setDate(date.getDate() + 7);
+          dueDate = date.toISOString();
+        } else if (dateText.includes('q1') || dateText.includes('quarter 1')) {
+          date = new Date(date.getFullYear(), 2, 31); // End of Q1
+          dueDate = date.toISOString();
+        } else if (dateText.includes('q2') || dateText.includes('quarter 2')) {
+          date = new Date(date.getFullYear(), 5, 30); // End of Q2
+          dueDate = date.toISOString();
+        } else if (dateText.includes('q3') || dateText.includes('quarter 3')) {
+          date = new Date(date.getFullYear(), 8, 30); // End of Q3
+          dueDate = date.toISOString();
+        } else if (dateText.includes('q4') || dateText.includes('quarter 4')) {
+          date = new Date(date.getFullYear(), 11, 31); // End of Q4
+          dueDate = date.toISOString();
+        } else if (/monday|tuesday|wednesday|thursday|friday|saturday|sunday/.test(dateText)) {
+          // Handle day of week
+          const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+          for (let i = 0; i < days.length; i++) {
+            if (dateText.includes(days[i])) {
+              const today = date.getDay();
+              const daysUntil = (i - today + 7) % 7;
+              date.setDate(date.getDate() + daysUntil);
+              dueDate = date.toISOString();
+              break;
+            }
+          }
         }
+      } catch (e) {
+        console.error('Error parsing deadline:', e);
       }
-      
-      dueDate = date.toISOString();
+    }
+    
+    // Format priority if available
+    let priorityInfo = '';
+    if (detectionResult.priority) {
+      priorityInfo = `\n• Priority: ${detectionResult.priority.charAt(0).toUpperCase() + detectionResult.priority.slice(1)}`;
     }
     
     // Create a basic interactive message to select an assignee
@@ -134,7 +173,14 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, team
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: `*New Task*: ${taskText}${skillsText}`
+            text: `*New Task*: ${taskText}`
+          }
+        },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Details*:${skillsText}${deadlineInfo}${priorityInfo}`
           }
         },
         dueDate ? {
@@ -161,14 +207,32 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, team
               emoji: true
             },
             action_id: 'select_assignee',
-            options: potentialAssignees.map(assignee => ({
-              text: {
-                type: 'plain_text',
-                text: `${assignee.name} (${assignee.matchReason})`.substring(0, 75), // Slack limits option text to 75 chars
-                emoji: true
-              },
-              value: assignee.userId
-            }))
+            options: potentialAssignees.map(assignee => {
+              // Format the display text to show skills and reason
+              let optionText = assignee.name;
+              
+              // Add skills info if available
+              if (assignee.matchedSkills && assignee.matchedSkills.length > 0) {
+                optionText += ` (Skills: ${assignee.matchedSkills.join(', ')})`;
+              } else {
+                // If no skills matched but we have a reason, show that
+                optionText += ` (${assignee.matchReason})`;
+              }
+              
+              // Ensure text fits within Slack's 75 character limit
+              if (optionText.length > 75) {
+                optionText = optionText.substring(0, 72) + '...';
+              }
+              
+              return {
+                text: {
+                  type: 'plain_text',
+                  text: optionText,
+                  emoji: true
+                },
+                value: assignee.userId
+              };
+            })
           }
         },
         {
@@ -186,7 +250,7 @@ export async function handleDelegateCommand({ text, slackUserId, channelId, team
               value: JSON.stringify({
                 taskText,
                 channelId,
-                skills: matchedSkills.map(s => s.id),
+                skills: detectedSkills,
                 dueDate,
                 teamId: teamIdToUse,
                 delegatorId: userData.id

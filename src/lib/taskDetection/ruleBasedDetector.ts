@@ -20,13 +20,13 @@ import { TaskDetector, TaskDetectionResult, TaskDetectorOptions } from './types'
 const TASK_VERBS = [
   'do', 'make', 'create', 'write', 'prepare', 'update', 'review', 'check',
   'finish', 'complete', 'fix', 'implement', 'develop', 'design', 'build',
-  'test', 'deploy', 'send', 'share', 'analyze', 'research', 'investigate'
+  'test', 'deploy', 'send', 'share', 'analyze', 'research', 'investigate', 'help'
 ];
 
 const REQUEST_PATTERNS = [
   'can you', 'could you', 'would you', 'please', 'pls', 'need to', 'needs to',
   'should', 'must', 'have to', 'has to', 'required', 'want to', 'would like',
-  'need someone', 'looking for someone'
+  'need someone', 'looking for someone', 'can someone'
 ];
 
 const PRIORITY_INDICATORS = {
@@ -40,17 +40,56 @@ const DELEGATION_PATTERNS = [
   'take ownership of', 'lead', 'drive', 'manage'
 ];
 
+// Common software and business skills to detect
+const COMMON_SKILLS = [
+  'excel', 'word', 'powerpoint', 'google docs', 'google sheets', 'spreadsheet',
+  'presentation', 'document', 'report', 'analysis', 'data',
+  'python', 'javascript', 'typescript', 'react', 'angular', 'vue', 'node',
+  'java', 'c#', 'c++', 'php', 'ruby', 'swift', 'kotlin', 'go', 'rust',
+  'sql', 'mysql', 'postgresql', 'mongodb', 'database', 'nosql',
+  'aws', 'azure', 'gcp', 'cloud', 'devops', 'ci/cd', 'docker', 'kubernetes',
+  'git', 'github', 'gitlab', 'bitbucket',
+  'frontend', 'backend', 'fullstack', 'web', 'mobile', 'desktop',
+  'design', 'ui', 'ux', 'figma', 'sketch', 'adobe', 'photoshop', 'illustrator',
+  'research', 'analysis', 'marketing', 'sales', 'customer service',
+  'finance', 'accounting', 'hr', 'legal', 'operations',
+  'project management', 'product management', 'agile', 'scrum', 'kanban',
+  'presentation', 'communication', 'leadership', 'teamwork',
+  'qa', 'testing', 'automation', 'manual testing',
+  'security', 'compliance', 'gdpr', 'hipaa', 'soc2',
+  'data science', 'machine learning', 'ai', 'nlp', 'computer vision',
+  'analytics', 'reporting', 'dashboard', 'visualization', 'tableau', 'power bi',
+  'social media', 'content', 'seo', 'sem', 'ppc', 'email marketing',
+  'crm', 'salesforce', 'hubspot', 'zendesk', 'jira', 'confluence',
+  'api', 'rest', 'graphql', 'soap', 'microservices', 'serverless',
+  'performance', 'optimization', 'scaling', 'monitoring', 'logging'
+];
+
 // Patterns that often indicate imperative sentences
 const IMPERATIVE_PATTERNS = [
   'please', 'kindly', 'make sure', 'ensure', 'let\'s', 'let us', 
   'remember to', 'don\'t forget', 'help', 'consider'
 ];
 
+// Time period keywords for deadline extraction
+const TIME_PERIODS = [
+  'today', 'tomorrow', 'this week', 'next week', 'this month', 'next month',
+  'this quarter', 'next quarter', 'this year', 'next year',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+  'q1', 'q2', 'q3', 'q4', 'quarter 1', 'quarter 2', 'quarter 3', 'quarter 4'
+];
+
 export class RuleBasedTaskDetector implements TaskDetector {
   private skillsList: string[];
 
   constructor(skillsList: string[] = []) {
-    this.skillsList = skillsList.map(s => s.toLowerCase());
+    // Combine provided skills list with common skills
+    this.skillsList = Array.from(new Set([
+      ...skillsList.map(s => s.toLowerCase()),
+      ...COMMON_SKILLS.map(s => s.toLowerCase())
+    ]));
   }
 
   async detectTask(
@@ -114,25 +153,25 @@ export class RuleBasedTaskDetector implements TaskDetector {
     // 5. Check for dates/deadlines - safely try to use the dates plugin
     let deadline = null;
     try {
-    // Use type assertion to bypass TypeScript checking
-    const docAny = doc as any;
-    if (typeof docAny.dates === 'function') {
+      // Use type assertion to bypass TypeScript checking
+      const docAny = doc as any;
+      if (typeof docAny.dates === 'function') {
         const dates = docAny.dates();
         if (dates.found) {
-        score += 0.15;
-        deadline = dates.text();
-        if (verbose) console.log('Detected date/deadline:', deadline);
+          score += 0.15;
+          deadline = dates.text();
+          if (verbose) console.log('Detected date/deadline:', deadline);
         }
-    }
+      }
     } catch (e) {
-    // Fall back to regex for common date patterns
-    const dateRegex = /(today|tomorrow|next week|this week|by (?:mon|tues|wednes|thurs|fri|satur|sun)day|by (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2})/i;
-    const match = text.match(dateRegex);
-    if (match) {
+      // Fall back to regex for common date patterns
+      const dateRegex = new RegExp(`(${TIME_PERIODS.join('|')})`, 'i');
+      const match = text.match(dateRegex);
+      if (match) {
         score += 0.15;
         deadline = match[0];
         if (verbose) console.log('Detected date/deadline via regex:', deadline);
-    }
+      }
     }
     
     if (deadline) {
@@ -153,9 +192,19 @@ export class RuleBasedTaskDetector implements TaskDetector {
     }
     
     // 7. Match skills from our list
-    const matchedSkills = this.skillsList.filter(skill => 
-      lowerText.includes(skill.toLowerCase())
-    );
+    const words = lowerText.split(/\s+/);
+    const matchedSkills = this.skillsList.filter(skill => {
+      // Match exact skill names
+      if (lowerText.includes(skill.toLowerCase())) return true;
+      
+      // Match multi-word skills
+      const skillWords = skill.toLowerCase().split(/\s+/);
+      if (skillWords.length > 1) {
+        return skillWords.every(word => words.includes(word));
+      }
+      
+      return false;
+    });
     
     if (matchedSkills.length > 0) {
       score += 0.1;

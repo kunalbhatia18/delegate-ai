@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { signOut } from '@/lib/supabase/auth';
+import NotificationsDropdown from '@/components/notifications/NotificationsDropdown';
 
 export default function Navbar() {
   const { user, loading } = useAuth();
@@ -57,38 +58,51 @@ export default function Navbar() {
             {loading ? (
               <div className="h-8 w-20 bg-gray-200 rounded animate-pulse"></div>
             ) : user ? (
-              <div className="relative ml-3">
-                <div>
-                  <button
-                    onClick={() => setIsMenuOpen(!isMenuOpen)}
-                    className="flex text-sm rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                  >
-                    <span className="sr-only">Open user menu</span>
-                    <div className="h-8 w-8 rounded-full bg-blue-200 flex items-center justify-center">
-                      {user.email?.charAt(0).toUpperCase()}
-                    </div>
-                  </button>
-                </div>
-                {isMenuOpen && (
-                  <div className="origin-top-right absolute right-0 mt-2 w-48 rounded-md shadow-lg py-1 bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-10">
-                    <Link
-                      href="/profile"
-                      className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                      onClick={() => setIsMenuOpen(false)}
-                    >
-                      Your Profile
-                    </Link>
+              <div className="flex items-center">
+                {/* Notifications Dropdown */}
+                <NotificationsDropdown />
+                
+                {/* User Menu */}
+                <div className="relative ml-3">
+                  <div>
                     <button
-                      onClick={() => {
-                        setIsMenuOpen(false);
-                        handleSignOut();
-                      }}
-                      className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                      onClick={() => setIsMenuOpen(!isMenuOpen)}
+                      className="flex text-sm rounded-full focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                     >
-                      Sign out
+                      <span className="sr-only">Open user menu</span>
+                      <div className="h-8 w-8 rounded-full bg-blue-200 flex items-center justify-center">
+                        {user.email?.charAt(0).toUpperCase()}
+                      </div>
                     </button>
                   </div>
-                )}
+                  {isMenuOpen && (
+                    <div className="origin-top-right absolute right-0 mt-2 w-48 rounded-md shadow-lg py-1 bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-10">
+                      <Link
+                        href="/profile"
+                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        onClick={() => setIsMenuOpen(false)}
+                      >
+                        Your Profile
+                      </Link>
+                      <Link
+                        href="/dashboard"
+                        className="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        onClick={() => setIsMenuOpen(false)}
+                      >
+                        Dashboard
+                      </Link>
+                      <button
+                        onClick={() => {
+                          setIsMenuOpen(false);
+                          handleSignOut();
+                        }}
+                        className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                      >
+                        Sign out
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="flex space-x-4">
@@ -191,7 +205,7 @@ export default function Navbar() {
                 </div>
                 <div className="ml-3">
                   <div className="text-base font-medium text-gray-800">
-                    {user.user_metadata.full_name || 'User'}
+                    {user.user_metadata?.full_name || 'User'}
                   </div>
                   <div className="text-sm font-medium text-gray-500">{user.email}</div>
                 </div>

@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import RouteGuard from '@/components/auth/RouteGuard';
@@ -10,6 +11,7 @@ export default function DashboardLayout({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const [skillsMenuOpen, setSkillsMenuOpen] = useState(false);
   
   return (
     <RouteGuard>
@@ -43,16 +45,54 @@ export default function DashboardLayout({
               >
                 Tasks
               </Link>
-              <Link
-                href="/dashboard/skills"
-                className={`block px-4 py-2 rounded ${
-                  pathname.startsWith('/dashboard/skills')
-                    ? 'bg-blue-50 text-blue-600'
-                    : 'text-gray-700 hover:bg-gray-100'
-                }`}
-              >
-                Skills
-              </Link>
+              
+              {/* Skills menu with dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setSkillsMenuOpen(!skillsMenuOpen)}
+                  className={`w-full text-left px-4 py-2 rounded flex justify-between items-center ${
+                    pathname.startsWith('/dashboard/skills')
+                      ? 'bg-blue-50 text-blue-600'
+                      : 'text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  <span>Skills</span>
+                  <svg 
+                    className={`w-4 h-4 transition-transform ${skillsMenuOpen ? 'transform rotate-180' : ''}`}
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                
+                {skillsMenuOpen && (
+                  <div className="pl-6 space-y-1 mt-1">
+                    <Link
+                      href="/dashboard/skills"
+                      className={`block px-4 py-2 rounded ${
+                        pathname === '/dashboard/skills'
+                          ? 'bg-blue-50 text-blue-600'
+                          : 'text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      Your Skills
+                    </Link>
+                    <Link
+                      href="/dashboard/skills/team"
+                      className={`block px-4 py-2 rounded ${
+                        pathname === '/dashboard/skills/team'
+                          ? 'bg-blue-50 text-blue-600'
+                          : 'text-gray-700 hover:bg-gray-100'
+                      }`}
+                    >
+                      Team Skills
+                    </Link>
+                  </div>
+                )}
+              </div>
+              
               <Link
                 href="/dashboard/team"
                 className={`block px-4 py-2 rounded ${
